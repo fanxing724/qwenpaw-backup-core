@@ -1,0 +1,26 @@
+{
+  "id": "backup-core",
+  "name": "备份核心",
+  "version": "0.1.0",
+  "description": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
+  "description_i18n": {
+    "zh-CN": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
+    "en-US": "Back important files up to private Gitee/GitHub repos: plugin collects and sanitizes, an agent converts to readable formats, pushed via git over SSH."
+  },
+  "author": "番星 & QA Agent",
+  "license": "MIT",
+  "type": "app",
+  "qwenpaw_version": { "min": "2.0.1" },
+  "entry": { "backend": "plugin.py" },
+  "permissions": ["workspace.read", "storage"],
+  "meta": {
+    "category": "utility",
+    "tools": [
+      { "name": "backup_core_get_draft", "description": "读取脱敏后的备份草稿（供 Agent 转换格式）" },
+      { "name": "backup_core_submit_markdown", "description": "提交 Agent 转换后的可读备份文档" },
+      { "name": "backup_core_push", "description": "把当前暂存备份推送到所有已配置远端" },
+      { "name": "backup_core_status", "description": "读取最近备份运行状态" }
+    ]
+  },
+  "dependencies": []
+}

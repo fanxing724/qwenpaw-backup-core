@@ -1,0 +1,453 @@
+# -*- coding: utf-8 -*-
+"""备份核心：把重要文件备份到 Gitee / GitHub 私有仓库。
+
+流程（agent 参与转换）：
+  1. 插件采集并脱敏 → 暂存区（companion 快照 json + 工作区重要文件）
+  2. Agent 调 backup_core_get_draft 取草稿，转换成可读格式（markdown 等）
+  3. Agent 调 backup_core_submit_markdown 提交转换结果
+  4. backup_core_push 将暂存区 commit + push 到所有已配置远端（git over SSH）
+
+安全边界：
+  - 密钥永不进备份：organizer api_key、care token、credentials、ssh 私钥一律剔除
+  - 只推送到设置里显式配置的远端；分支可配（默认 main）
+  - 暂存与缓存都在插件数据目录内；单次备份有大小/文件数上限
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+PLUGIN_VERSION = "0.1.0"
+MAX_FILES = 400
+MAX_BYTES = 24 * 1024 * 1024
+SECRET_PATTERNS = re.compile(
+    r"(api[_-]?key|token|secret|password|passwd|authorization|bearer|private[_-]?key)",
+    re.IGNORECASE)
+
+router = APIRouter()
+
+_DATA_DIR = Path(os.environ.get(
+    "QWENPAW_BACKUP_DATA",
+    Path.home() / ".qwenpaw" / "data" / "backup-core"))
+_lock = threading.RLock()
+
+
+class Target(BaseModel):
+    name: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    url: str = Field(min_length=1, max_length=300)
+    branch: str = Field(default="main", max_length=60)
+
+
+class Settings(BaseModel):
+    targets: list[Target] = Field(default_factory=list)
+    companion: bool = True
+    workspace_globs: list[str] = Field(default_factory=lambda: [
+        "MEMORY.md", "PROFILE.md", "AGENTS.md", "SOUL.md",
+        "jobs.json", "skills/companion_core/SKILL.md"])
+    workspace_root: str = ""
+    git_name: str = "番星"
+    git_email: str = "3509412293@qq.com"
+    key_path: str = ""
+    repo_subdir: str = Field(default="backups", max_length=60)
+    auto: bool = False
+    time: str = "03:30"
+
+
+def _read_json(path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) or default
+    except (OSError, ValueError):
+        return default
+
+
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _settings_path():
+    return _DATA_DIR / "backup-settings.json"
+
+
+def _read_settings():
+    data = _read_json(_settings_path(), {})
+    base = Settings().model_dump()
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in base:
+                base[key] = value
+    return Settings.model_validate(base).model_dump()
+
+
+def _companion_data_dir():
+    return Path(os.environ.get(
+        "QWENPAW_COMPANION_DATA",
+        Path.home() / ".qwenpaw" / "data" / "companion-core"))
+
+
+def _sanitize_obj(obj):
+    """Deep-strip secret-looking values from dicts/lists."""
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if SECRET_PATTERNS.search(str(key)):
+                out[key] = "***"
+            else:
+                out[key] = _sanitize_obj(value)
+        return out
+    if isinstance(obj, list):
+        return [_sanitize_obj(x) for x in obj]
+    return obj
+
+
+def _stage_dir():
+    return _DATA_DIR / "stage"
+
+
+def _collect(cfg):
+    stage = _stage_dir()
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True, exist_ok=True)
+    manifest = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "version": PLUGIN_VERSION, "files": []}
+
+    def add(src: Path, rel: str):
+        if not src.is_file() or src.is_symlink():
+            return
+        if src.stat().st_size > 2 * 1024 * 1024:
+            return
+        dest = stage / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        manifest["files"].append({"path": rel, "bytes": src.stat().st_size})
+
+    if cfg["companion"]:
+        cdir = _companion_data_dir()
+        for name in ("state.yaml", "schedule.yaml", "routine.yaml", "relationship.yaml",
+                     "important_dates.yaml", "notes.json", "interactions.json",
+                     "usage.json", "profiles.json", "care-state.json",
+                     "organizer-settings.json", "diary-settings.json"):
+            src = cdir / name
+            if not src.is_file():
+                continue
+            if name == "organizer-settings.json":
+                data = _sanitize_obj(_read_json(src, {}))
+                dest = stage / "companion" / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                manifest["files"].append({"path": f"companion/{name}",
+                                          "bytes": dest.stat().st_size, "sanitized": True})
+            elif name == "care-state.json":
+                data = _read_json(src, {})
+                for agent_cfg in (data.get("settings") or {}).values():
+                    if isinstance(agent_cfg, dict):
+                        agent_cfg.pop("token", None)
+                        agent_cfg.pop("model_signature", None)
+                dest = stage / "companion" / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                manifest["files"].append({"path": f"companion/{name}",
+                                          "bytes": dest.stat().st_size, "sanitized": True})
+            else:
+                add(src, f"companion/{name}")
+        for folder, pattern in (("diary", "*.md"), ("weekly", "*.md"), ("dreams", "*.md"),
+                                ("history", "*.yaml")):
+            src_dir = cdir / folder
+            if src_dir.is_dir() and not src_dir.is_symlink():
+                for item in sorted(src_dir.glob(pattern))[:300]:
+                    add(item, f"companion/{folder}/{item.name}")
+
+    root = Path(cfg["workspace_root"]) if cfg["workspace_root"] else None
+    if root is None:
+        candidate = Path(os.environ.get("QWENPAW_WORKING_DIR", ""))
+        root = candidate if candidate.is_dir() else Path.cwd()
+    for pattern in cfg["workspace_globs"]:
+        for hit in sorted(root.glob(pattern))[:50]:
+            rel = hit.relative_to(root).as_posix()
+            if any(part.startswith(".") for part in Path(rel).parts):
+                continue
+            add(hit, f"workspace/{rel}")
+
+    total = sum(f["bytes"] for f in manifest["files"])
+    if len(manifest["files"]) > MAX_FILES or total > MAX_BYTES:
+        raise HTTPException(400, f"备份超过上限（{len(manifest['files'])} 文件 / {total} 字节）")
+    _write_json(stage / "manifest.json", manifest)
+    return manifest
+
+
+def _render_readable(stage: Path):
+    """Deterministic human-readable render (agent markdown may replace/extend)."""
+    lines = ["# 陪伴备份可读版", "", f"生成时间：{time.strftime('%Y-%m-%d %H:%M %Z')}"]
+    state_file = stage / "companion" / "state.yaml"
+    if state_file.is_file():
+        try:
+            import yaml
+            state = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+            lines += ["", "## 当前状态",
+                      f"- 心情：{state.get('mood') or '未记录'}",
+                      f"- 精力：{state.get('energy') or '未记录'}",
+                      f"- 睡眠：{state.get('sleep') or '未记录'}"]
+        except Exception:  # noqa: BLE001
+            lines += ["", "## 当前状态", "（解析失败，见 companion/state.yaml）"]
+    notes_file = stage / "companion" / "notes.json"
+    if notes_file.is_file():
+        notes = _read_json(notes_file, [])
+        lines += ["", f"## 便签（{len(notes)}）"]
+        lines += [f"- {n.get('content', '')}" for n in notes[:30] if isinstance(n, dict)]
+    (stage / "READABLE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _git_env(cfg):
+    env = dict(os.environ)
+    key = cfg.get("key_path") or str(Path.home() / ".ssh" / "id_ed25519")
+    if Path(key).is_file():
+        env["GIT_SSH_COMMAND"] = f"ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _run_git(args, cwd, cfg):
+    proc = subprocess.run(["git", *args], cwd=str(cwd), env=_git_env(cfg),
+                          capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise HTTPException(502, f"git {' '.join(args)} 失败：{proc.stderr.strip()[:300]}")
+    return proc.stdout.strip()
+
+
+def _push_all(cfg, message):
+    stage = _stage_dir()
+    if not stage.is_dir():
+        raise HTTPException(400, "没有暂存备份，请先采集")
+    results = []
+    cache_root = _DATA_DIR / "cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    for target in cfg["targets"]:
+        repo = cache_root / target["name"]
+        try:
+            if not (repo / ".git").is_dir():
+                if repo.exists():
+                    shutil.rmtree(repo)
+                try:
+                    _run_git(["clone", "--depth", "1", "--branch", target["branch"],
+                              target["url"], str(repo)], cache_root, cfg)
+                except HTTPException as exc:
+                    if "not found" not in str(exc.detail):
+                        raise
+                    # 空仓库：本地初始化后首推创建分支
+                    repo.mkdir(parents=True, exist_ok=True)
+                    _run_git(["init", "-b", target["branch"]], repo, cfg)
+                    _run_git(["remote", "add", "origin", target["url"]], repo, cfg)
+            else:
+                _run_git(["fetch", "--depth", "1", "origin", target["branch"]], repo, cfg)
+                _run_git(["checkout", target["branch"]], repo, cfg)
+                _run_git(["reset", "--hard", f"origin/{target['branch']}"], repo, cfg)
+            sub = repo / (cfg.get("repo_subdir") or "")
+            if not str(sub.resolve()).startswith(str(repo.resolve())):
+                raise HTTPException(400, "repo_subdir 越界")
+            if sub.resolve() == repo.resolve():
+                for item in repo.iterdir():
+                    if item.name == ".git":
+                        continue
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+            else:
+                if sub.exists():
+                    shutil.rmtree(sub)
+                sub.mkdir(parents=True, exist_ok=True)
+
+            def copy_stage(dest_root: Path):
+                dest_root.mkdir(parents=True, exist_ok=True)
+                for item in stage.iterdir():
+                    dest = dest_root / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+
+            copy_stage(sub / "latest")
+            day = time.strftime("%Y-%m-%d")
+            history_root = sub / "history"
+            hist = history_root / day
+            if hist.exists():
+                shutil.rmtree(hist)
+            copy_stage(hist)
+            if history_root.is_dir():
+                for old_dir in sorted(history_root.iterdir(), key=lambda x: x.name, reverse=True)[30:]:
+                    if old_dir.is_dir():
+                        shutil.rmtree(old_dir)
+            _run_git(["add", "-A"], repo, cfg)
+            status = _run_git(["status", "--porcelain"], repo, cfg)
+            if not status:
+                results.append({"target": target["name"], "state": "no-change"})
+                continue
+            _run_git(["-c", f"user.name={cfg['git_name']}", "-c", f"user.email={cfg['git_email']}",
+                      "commit", "-m", message], repo, cfg)
+            try:
+                _run_git(["rev-parse", "--verify", f"origin/{target['branch']}"], repo, cfg)
+                _run_git(["push", "origin", target["branch"]], repo, cfg)
+            except HTTPException:
+                _run_git(["push", "-u", "origin", target["branch"]], repo, cfg)
+            results.append({"target": target["name"], "state": "pushed"})
+        except HTTPException as exc:
+            results.append({"target": target["name"], "state": "error", "error": exc.detail})
+        except (OSError, subprocess.SubprocessError) as exc:
+            results.append({"target": target["name"], "state": "error", "error": str(exc)[:300]})
+    return results
+
+
+def _record_status(info):
+    history = _read_json(_DATA_DIR / "backup-status.json", [])
+    if not isinstance(history, list):
+        history = []
+    history.append(info)
+    _write_json(_DATA_DIR / "backup-status.json", history[-30:])
+
+
+@router.get("/settings")
+def get_settings():
+    return _read_settings()
+
+
+def _save_settings(data: dict):
+    with _lock:
+        _write_json(_settings_path(), Settings.model_validate(data).model_dump())
+    return _read_settings()
+
+
+@router.put("/settings")
+def put_settings(payload: Settings):
+    return _save_settings(payload.model_dump())
+
+
+@router.post("/collect")
+def collect():
+    with _lock:
+        cfg = _read_settings()
+        manifest = _collect(cfg)
+        _render_readable(_stage_dir())
+    return {"files": len(manifest["files"]),
+            "bytes": sum(f["bytes"] for f in manifest["files"]),
+            "paths": [f["path"] for f in manifest["files"]]}
+
+
+@router.get("/draft")
+def draft():
+    """脱敏草稿：供 Agent 读取并转换为合适格式。"""
+    stage = _stage_dir()
+    if not stage.is_dir():
+        raise HTTPException(400, "请先 POST /collect")
+    out = {}
+    for item in sorted(stage.rglob("*")):
+        if item.is_file() and item.suffix in {".json", ".md"} and item.name != "manifest.json":
+            text = item.read_text(encoding="utf-8", errors="replace")
+            out[item.relative_to(stage).as_posix()] = text[:20000]
+    return out
+
+
+@router.post("/markdown")
+def submit_markdown(payload: dict):
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip() or len(text) > 200000:
+        raise HTTPException(400, "markdown 内容无效")
+    if SECRET_PATTERNS.search(text) and "===KEY===" not in text:
+        raise HTTPException(400, "转换结果疑似包含密钥，已拒绝；请脱敏后重交")
+    with _lock:
+        (_stage_dir() / "AGENT-NOTES.md").write_text(text, encoding="utf-8")
+    return {"saved": "AGENT-NOTES.md", "bytes": len(text.encode("utf-8"))}
+
+
+@router.post("/push")
+def push(payload: dict | None = None):
+    message = (payload or {}).get("message") or f"backup: {time.strftime('%Y-%m-%d %H:%M')}"
+    with _lock:
+        cfg = _read_settings()
+        if not cfg["targets"]:
+            raise HTTPException(400, "尚未配置备份远端")
+        results = _push_all(cfg, message)
+    _record_status({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "message": message, "results": results})
+    return {"results": results}
+
+
+@router.get("/status")
+def status():
+    return _read_json(_DATA_DIR / "backup-status.json", [])
+
+
+def install(app=None):
+    return router
+
+
+# ── Agent 工具（默认禁用，需在智能体工具开关中启用）───────────────────
+
+def tool_get_draft() -> str:
+    """读取脱敏后的备份草稿，供转换为可读格式。"""
+    stage = _stage_dir()
+    if not stage.is_dir():
+        return "还没有暂存备份：请先调用备份采集（POST /api/backup-core/collect）。"
+    return json.dumps(draft(), ensure_ascii=False)[:60000]
+
+
+def tool_submit_markdown(text: str) -> str:
+    """提交 Agent 转换后的可读备份文档（AGENT-NOTES.md）。"""
+    try:
+        result = submit_markdown({"text": text})
+    except HTTPException as exc:
+        return f"提交失败：{exc.detail}"
+    return f"已保存 {result['saved']}（{result['bytes']} 字节），下一步调用 backup_core_push。"
+
+
+def tool_push(message: str = "") -> str:
+    """把当前暂存备份推送到所有已配置远端。"""
+    try:
+        result = push({"message": message} if message else None)
+    except HTTPException as exc:
+        return f"推送失败：{exc.detail}"
+    return json.dumps(result, ensure_ascii=False)
+
+
+def tool_status() -> str:
+    """最近备份运行状态。"""
+    return json.dumps(status(), ensure_ascii=False)[:20000]
+
+
+class BackupCorePlugin:
+    """Entry point for the QwenPaw plugin loader."""
+
+    def register(self, api):
+        api.register_http_router(router, prefix="/backup-core", tags=["backup-core"])
+        api.register_tool("backup_core_get_draft", tool_get_draft,
+                          description="读取备份核心脱敏草稿（companion 快照与工作区重要文件）",
+                          icon="📦", tool_type="internal")
+        api.register_tool("backup_core_submit_markdown", tool_submit_markdown,
+                          description="提交转换后的可读备份文档（markdown）",
+                          icon="✍️", tool_type="internal")
+        api.register_tool("backup_core_push", tool_push,
+                          description="推送暂存备份到已配置的 Gitee/GitHub 远端",
+                          icon="☁️", tool_type="network")
+        api.register_tool("backup_core_status", tool_status,
+                          description="查看最近备份运行状态",
+                          icon="🩺", tool_type="internal")
+
+
+plugin = BackupCorePlugin()
