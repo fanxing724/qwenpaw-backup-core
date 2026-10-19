@@ -29,6 +29,20 @@ collect（采集+脱敏+可读版）→ get_draft → Agent 转换 → submit_ma
 qwenpaw plugin install /path/to/qwenpaw-backup-core
 ```
 
+## 两级备份架构（v0.2.0）
+
+| 级别 | 频率 | 动作 | 依赖 |
+|---|---|---|---|
+| 第一级：本地仓库 | 每 1-2 小时 | 采集 → 脱敏 → 本地 git commit | 无网络、无凭据 |
+| 第二级：远端镜像 | 每晚一次 | 本地仓库 push 到 GitHub + Gitee | SSH key（持久化在 NAS） |
+
+- 本地 target：`{"name":"local","kind":"local","path":"<工作区内仓库目录>"}`
+- 远端 target：`{"name":"github","kind":"remote","url":"git@github.com:.../paw-vault.git"}`
+- 绑定智能体：`agent_id` 设置后只备份该 agent 的工作区，避免备错对象
+- 端点：`POST /commit-local`（第一级）、`POST /push`（第二级）；工具：`backup_core_commit_local` / `backup_core_push`
+- 远端 push 失败不影响本地备份，下次自动重试
+
+
 ## 开源协议
 
 MIT © 2026 番星。见 [LICENSE](LICENSE)。

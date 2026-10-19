@@ -41,12 +41,15 @@ _lock = threading.RLock()
 
 class Target(BaseModel):
     name: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9_-]*$")
-    url: str = Field(min_length=1, max_length=300)
+    kind: str = Field(default="remote", pattern=r"^(local|remote)$")
+    url: str = Field(default="", max_length=300)
+    path: str = Field(default="", max_length=300)
     branch: str = Field(default="main", max_length=60)
 
 
 class Settings(BaseModel):
     targets: list[Target] = Field(default_factory=list)
+    agent_id: str = Field(default="", max_length=100)
     companion: bool = True
     workspace_globs: list[str] = Field(default_factory=lambda: [
         "MEMORY.md", "PROFILE.md", "AGENTS.md", "SOUL.md",
@@ -176,6 +179,11 @@ def _collect(cfg):
                     add(item, f"companion/{folder}/{item.name}")
 
     root = Path(cfg["workspace_root"]) if cfg["workspace_root"] else None
+    if root is None and cfg.get("agent_id"):
+        # 绑定智能体：只备份该 agent 的工作区，避免备错
+        base = Path(os.environ.get("QWENPAW_WORKING_DIR", "") or (Path.home() / ".qwenpaw"))
+        cand = base / "workspaces" / cfg["agent_id"]
+        root = cand if cand.is_dir() else None
     if root is None:
         candidate = Path(os.environ.get("QWENPAW_WORKING_DIR", ""))
         root = candidate if candidate.is_dir() else Path.cwd()
@@ -232,86 +240,116 @@ def _run_git(args, cwd, cfg):
     return proc.stdout.strip()
 
 
-def _push_all(cfg, message):
+def _resolve_repo_path(target, cfg):
+    repo = Path(target.get("path") or "")
+    if not repo.is_absolute():
+        base = Path(os.environ.get("QWENPAW_WORKING_DIR", "") or (Path.home() / ".qwenpaw"))
+        repo = base / repo
+    return repo
+
+
+def _apply_stage_to_repo(repo: Path, sub: Path):
+    """stage -> 仓库布局（latest + history/日期，保留 30 天）。"""
+    stage = _stage_dir()
+    if not str(sub.resolve()).startswith(str(repo.resolve())):
+        raise HTTPException(400, "repo_subdir 越界")
+    if sub.resolve() == repo.resolve():
+        for item in repo.iterdir():
+            if item.name == ".git":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+    else:
+        if sub.exists():
+            shutil.rmtree(sub)
+        sub.mkdir(parents=True, exist_ok=True)
+
+    def copy_stage(dest_root: Path):
+        dest_root.mkdir(parents=True, exist_ok=True)
+        for item in stage.iterdir():
+            dest = dest_root / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+
+    copy_stage(sub / "latest")
+    day = time.strftime("%Y-%m-%d")
+    history_root = sub / "history"
+    hist = history_root / day
+    if hist.exists():
+        shutil.rmtree(hist)
+    copy_stage(hist)
+    if history_root.is_dir():
+        for old_dir in sorted(history_root.iterdir(), key=lambda x: x.name, reverse=True)[30:]:
+            if old_dir.is_dir():
+                shutil.rmtree(old_dir)
+
+
+def _commit_local(cfg, message):
+    """第一级备份：stage -> 本地仓库 commit（不 push，高频）。"""
     stage = _stage_dir()
     if not stage.is_dir():
         raise HTTPException(400, "没有暂存备份，请先采集")
+    locals_ = [t for t in cfg["targets"] if t.get("kind") == "local"]
+    if not locals_:
+        raise HTTPException(400, "尚未配置本地备份仓库（kind=local 的 target）")
     results = []
-    cache_root = _DATA_DIR / "cache"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    for target in cfg["targets"]:
-        repo = cache_root / target["name"]
+    for target in locals_:
+        repo = _resolve_repo_path(target, cfg)
         try:
+            repo.mkdir(parents=True, exist_ok=True)
             if not (repo / ".git").is_dir():
-                if repo.exists():
-                    shutil.rmtree(repo)
-                try:
-                    _run_git(["clone", "--depth", "1", "--branch", target["branch"],
-                              target["url"], str(repo)], cache_root, cfg)
-                except HTTPException as exc:
-                    if "not found" not in str(exc.detail):
-                        raise
-                    # 空仓库：本地初始化后首推创建分支
-                    repo.mkdir(parents=True, exist_ok=True)
-                    _run_git(["init", "-b", target["branch"]], repo, cfg)
-                    _run_git(["remote", "add", "origin", target["url"]], repo, cfg)
-            else:
-                _run_git(["fetch", "--depth", "1", "origin", target["branch"]], repo, cfg)
-                _run_git(["checkout", target["branch"]], repo, cfg)
-                _run_git(["reset", "--hard", f"origin/{target['branch']}"], repo, cfg)
+                _run_git(["init", "-b", target.get("branch") or "main"], repo, cfg)
             sub = repo / (cfg.get("repo_subdir") or "")
-            if not str(sub.resolve()).startswith(str(repo.resolve())):
-                raise HTTPException(400, "repo_subdir 越界")
-            if sub.resolve() == repo.resolve():
-                for item in repo.iterdir():
-                    if item.name == ".git":
-                        continue
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-            else:
-                if sub.exists():
-                    shutil.rmtree(sub)
-                sub.mkdir(parents=True, exist_ok=True)
-
-            def copy_stage(dest_root: Path):
-                dest_root.mkdir(parents=True, exist_ok=True)
-                for item in stage.iterdir():
-                    dest = dest_root / item.name
-                    if item.is_dir():
-                        shutil.copytree(item, dest)
-                    else:
-                        shutil.copy2(item, dest)
-
-            copy_stage(sub / "latest")
-            day = time.strftime("%Y-%m-%d")
-            history_root = sub / "history"
-            hist = history_root / day
-            if hist.exists():
-                shutil.rmtree(hist)
-            copy_stage(hist)
-            if history_root.is_dir():
-                for old_dir in sorted(history_root.iterdir(), key=lambda x: x.name, reverse=True)[30:]:
-                    if old_dir.is_dir():
-                        shutil.rmtree(old_dir)
+            _apply_stage_to_repo(repo, sub)
             _run_git(["add", "-A"], repo, cfg)
-            status = _run_git(["status", "--porcelain"], repo, cfg)
-            if not status:
+            if not _run_git(["status", "--porcelain"], repo, cfg):
                 results.append({"target": target["name"], "state": "no-change"})
                 continue
             _run_git(["-c", f"user.name={cfg['git_name']}", "-c", f"user.email={cfg['git_email']}",
                       "commit", "-m", message], repo, cfg)
+            results.append({"target": target["name"], "state": "committed",
+                            "commit": _run_git(["rev-parse", "--short", "HEAD"], repo, cfg).strip()})
+        except HTTPException as exc:
+            results.append({"target": target["name"], "state": "error", "error": exc.detail})
+        except (OSError, subprocess.SubprocessError) as exc:
+            results.append({"target": target["name"], "state": "error", "error": str(exc)[:300]})
+    return results
+
+
+def _push_remote(cfg, message):
+    """第二级备份：本地仓库 -> 所有 remote targets 镜像推送（低频）。"""
+    locals_ = [t for t in cfg["targets"] if t.get("kind") == "local"]
+    if not locals_:
+        raise HTTPException(400, "缺少本地仓库（kind=local），无法推送远端")
+    repo = _resolve_repo_path(locals_[0], cfg)
+    if not (repo / ".git").is_dir():
+        raise HTTPException(400, "本地备份仓库不存在，请先执行本地提交")
+    branch = locals_[0].get("branch") or "main"
+    results = []
+    for target in cfg["targets"]:
+        if target.get("kind") != "remote":
+            continue
+        try:
+            names = _run_git(["remote"], repo, cfg).split()
+            if target["name"] in names:
+                _run_git(["remote", "set-url", target["name"], target["url"]], repo, cfg)
+            else:
+                _run_git(["remote", "add", target["name"], target["url"]], repo, cfg)
             try:
-                _run_git(["rev-parse", "--verify", f"origin/{target['branch']}"], repo, cfg)
-                _run_git(["push", "origin", target["branch"]], repo, cfg)
+                _run_git(["push", target["name"], branch], repo, cfg)
             except HTTPException:
-                _run_git(["push", "-u", "origin", target["branch"]], repo, cfg)
+                _run_git(["push", "-u", target["name"], branch], repo, cfg)
             results.append({"target": target["name"], "state": "pushed"})
         except HTTPException as exc:
             results.append({"target": target["name"], "state": "error", "error": exc.detail})
         except (OSError, subprocess.SubprocessError) as exc:
             results.append({"target": target["name"], "state": "error", "error": str(exc)[:300]})
+    if not results:
+        raise HTTPException(400, "尚未配置远端（kind=remote 的 target）")
     return results
 
 
@@ -376,14 +414,30 @@ def submit_markdown(payload: dict):
     return {"saved": "AGENT-NOTES.md", "bytes": len(text.encode("utf-8"))}
 
 
+@router.post("/commit-local")
+def commit_local(payload: dict | None = None):
+    """第一级备份：采集 + 脱敏 + 本地仓库提交（高频，无网络依赖）。"""
+    message = (payload or {}).get("message") or f"local backup: {time.strftime('%Y-%m-%d %H:%M')}"
+    with _lock:
+        cfg = _read_settings()
+        manifest = _collect(cfg)
+        _render_readable(_stage_dir())
+        results = _commit_local(cfg, message)
+    _record_status({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "message": message, "results": results})
+    return {"files": len(manifest["files"]),
+            "bytes": sum(f["bytes"] for f in manifest["files"]),
+            "results": results}
+
+
 @router.post("/push")
 def push(payload: dict | None = None):
     message = (payload or {}).get("message") or f"backup: {time.strftime('%Y-%m-%d %H:%M')}"
     with _lock:
         cfg = _read_settings()
         if not cfg["targets"]:
-            raise HTTPException(400, "尚未配置备份远端")
-        results = _push_all(cfg, message)
+            raise HTTPException(400, "尚未配置备份目标")
+        results = _push_remote(cfg, message)
     _record_status({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "message": message, "results": results})
     return {"results": results}
@@ -417,8 +471,17 @@ def tool_submit_markdown(text: str) -> str:
     return f"已保存 {result['saved']}（{result['bytes']} 字节），下一步调用 backup_core_push。"
 
 
+def tool_commit_local(message: str = "") -> str:
+    """第一级备份：采集+脱敏后提交到本地仓库（高频，无网络）。"""
+    try:
+        result = commit_local({"message": message} if message else None)
+    except HTTPException as exc:
+        return f"本地提交失败：{exc.detail}"
+    return json.dumps(result, ensure_ascii=False)
+
+
 def tool_push(message: str = "") -> str:
-    """把当前暂存备份推送到所有已配置远端。"""
+    """把本地备份仓库推送到已配置的 GitHub/Gitee 远端（低频，每晚）。"""
     try:
         result = push({"message": message} if message else None)
     except HTTPException as exc:
@@ -442,8 +505,11 @@ class BackupCorePlugin:
         api.register_tool("backup_core_submit_markdown", tool_submit_markdown,
                           description="提交转换后的可读备份文档（markdown）",
                           icon="✍️", tool_type="internal")
+        api.register_tool("backup_core_commit_local", tool_commit_local,
+                          description="第一级备份：采集+脱敏后提交到本地仓库（高频，无网络）",
+                          icon="💾", tool_type="internal")
         api.register_tool("backup_core_push", tool_push,
-                          description="推送暂存备份到已配置的 Gitee/GitHub 远端",
+                          description="第二级备份：把本地备份仓库推送到 GitHub/Gitee 远端（低频）",
                           icon="☁️", tool_type="network")
         api.register_tool("backup_core_status", tool_status,
                           description="查看最近备份运行状态",

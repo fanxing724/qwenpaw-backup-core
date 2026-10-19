@@ -48,16 +48,19 @@ def tree(remote):
                           capture_output=True, text=True).stdout.split()
 
 
-def configure(module, remote, **extra):
-    module._save_settings({"targets": [{"name": "local", "url": f"file://{remote}", "branch": "main"}],
-                           "companion": True, "workspace_globs": [],
-                           "workspace_root": str(remote.parent), **extra})
+def configure(module, remote, vault, **extra):
+    module._save_settings({"targets": [
+        {"name": "local", "kind": "local", "path": str(vault), "branch": "main"},
+        {"name": "remote", "kind": "remote", "url": f"file://{remote}", "branch": "main"}],
+        "companion": True, "workspace_globs": [],
+        "workspace_root": str(remote.parent), **extra})
 
 
 def test_collect_sanitizes_and_push_creates_branch(backup):
     module, tmp_path = backup
     remote = make_remote(tmp_path)
-    configure(module, remote, repo_subdir="")
+    vault = tmp_path / "vault"
+    configure(module, remote, vault, repo_subdir="")
     collected = module.collect()
     assert collected["files"] >= 3
     organizer = json.loads((module._stage_dir() / "companion" / "organizer-settings.json").read_text())
@@ -65,6 +68,8 @@ def test_collect_sanitizes_and_push_creates_branch(backup):
     with pytest.raises(Exception):
         module.submit_markdown({"text": "leak api_key=abc123"})
     module.submit_markdown({"text": "# Agent 转换版\n\n心情测试，精力 70。"})
+    local = module.commit_local({"message": "local1"})
+    assert local["results"][0]["state"] == "committed"
     result = module.push({"message": "first"})
     assert result["results"][0]["state"] == "pushed"
     files = tree(remote)
@@ -76,15 +81,16 @@ def test_collect_sanitizes_and_push_creates_branch(backup):
                            "main:latest/companion/organizer-settings.json"],
                           capture_output=True, text=True).stdout
     assert "SUPER-SECRET" not in blob
-    second = module.push({"message": "second"})
+    second = module.commit_local({"message": "second"})
     assert second["results"][0]["state"] == "no-change"
 
 
 def test_repo_subdir_keeps_unrelated_files(backup):
     module, tmp_path = backup
     remote = make_remote(tmp_path, seed_readme=True)
-    configure(module, remote, repo_subdir="backups")
+    configure(module, remote, tmp_path / "vault2", repo_subdir="backups")
     module.collect()
+    module.commit_local({"message": "t"})
     assert module.push({"message": "t"})["results"][0]["state"] == "pushed"
     files = tree(remote)
     assert "README.md" in files
@@ -95,8 +101,9 @@ def test_repo_subdir_keeps_unrelated_files(backup):
 def test_status_records_runs(backup):
     module, tmp_path = backup
     remote = make_remote(tmp_path)
-    configure(module, remote, repo_subdir="")
+    configure(module, remote, tmp_path / "vault3", repo_subdir="")
     module.collect()
+    module.commit_local({"message": "t"})
     module.push({"message": "t"})
     history = module.status()
-    assert history and history[-1]["results"][0]["target"] == "local"
+    assert history and history[-1]["results"][0]["target"] == "remote"
