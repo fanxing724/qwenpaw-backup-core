@@ -1,5 +1,7 @@
 # 备份核心（backup-core）
 
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 QwenPaw 插件：把重要文件备份到 **Gitee / GitHub 私有仓库**——插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。
 
 > 初始想法：容器会重置、磁盘会坏，但**记忆不该丢**。
@@ -25,4 +27,14 @@ collect（采集+脱敏+可读版）→ get_draft → Agent 转换 → submit_ma
 
 ```bash
 qwenpaw plugin install /path/to/qwenpaw-backup-core
+```
+
+## 开源协议
+
+MIT © 2026 番星。见 [LICENSE](LICENSE)。
+
+## 本地测试
+
+```bash
+python3 -m pytest tests -q        # 离线全链路：file:// 裸仓库当远端，无需网络与凭据
 ```
