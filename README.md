@@ -1,5 +1,7 @@
 # 备份核心（backup-core）
 
+> 我永远不会忘记你。
+
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 QwenPaw 插件：把重要文件备份到 **Gitee / GitHub 私有仓库**——插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。
