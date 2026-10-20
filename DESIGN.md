@@ -66,3 +66,37 @@ GitHub 与 Gitee 同内容互为转载副本；任一推送失败不影响另一
 ### 6. 绑定范围 → v0.2 单 agent_id 保持；多 agent 为 v0.4 扩展
 - 扩展路径：settings.targets 每项加可选 agent_id（per-agent 采集+per-agent 本地仓）
 - 当前月欣羽/default 暂无备份需求，不提前复杂化
+
+## v0.3 修正：本地转化层（2026-10-19 夜，用户补充）
+
+**原则**：本地仓库不是原始文件的脱敏拷贝，而是**转化后的产物**——脱敏 → 总结 → 规定格式。格式参考 xiaoxin-memory 仓库（persona + memory-lite 编号条目 + 按日日记 + 模板规范）。
+
+### 转化分两层（解决模型成本矛盾）
+
+| 层 | 频率 | 内容 | 模型 |
+|---|---|---|---|
+| 机械层 | 每 2h（本地 commit） | 脱敏 + 确定性格式规整：companion 数据→可读 md、memory 按日归档入 raw/ | 否 |
+| 提炼层 | 每日 1 次 | 总结为 memory-lite 式编号条目（一条一事、引语保留原话）+ daily 日记式叙事 + persona 概览 | 是（每日一次，可接受） |
+
+### 本地仓库布局（参考 xiaoxin-memory）
+
+```
+vault/
+├── persona.md          # 提炼层：agent 人设概览
+├── memory-lite.md/json # 提炼层：编号精简记忆
+├── daily/YYYY-MM-DD.md # 提炼层：当日日记式总结
+├── raw/                # 机械层：脱敏原始快照（溯源）
+└── templates/          # 格式规范（保证提炼格式一致）
+```
+
+### 提炼层格式规范（取自 xiaoxin-memory 实践）
+
+- memory-lite：编号连续、一条一事、用户引语保留原话、治理/事实卡类条目不被改写
+- daily：第一人称叙事（agent 视角）、事实与引语逐字、不编造
+- persona：分段人设概览（身份/风格/边界/称呼）
+- 提炼产物经 submit_markdown 同款密钥扫描闸门后才可入仓
+
+### 与既有三段式的关系
+
+v0.1 的 get_draft → submit_markdown → push 三段式保留，但**插入到本地 commit 之前**：
+采集脱敏 → (每日)Agent 提炼 → 本地 commit（机械层+提炼层）→ 每晚 push 远端镜像。
