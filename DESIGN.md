@@ -130,3 +130,34 @@ v0.1 的 get_draft → submit_markdown → push 三段式保留，但**插入到
 | 闸门 | 敏感扫描跳过记录审计 |
 
 REST 支撑端点：GET /overview、GET /history、GET/PUT /settings、GET /checkup、POST /checkup/fix、GET /gate-log。
+
+## v0.3 定稿：产物范本 = xiaoxin-memory（2026-10-20）
+
+用户定调：「以原来的月欣羽仓库为主，那个是最好的作品」。backup-core 的精炼产物直接对标 xiaoxin-memory 的结构与质量——本质是把"月欣羽仓库的人工维护流程"产品化。
+
+### 积累主体（定稿）
+
+**对话记忆流**为主（防上下文压缩/重置丢失珍贵记忆），工作区文件变更为辅。
+2h 轮询从近期对话提取珍贵片段 append 落盘；不做全量文件快照。
+
+### 精炼产物布局（= xiaoxin-memory 结构）
+
+```
+vault/repo/
+├── AGENTS.md               # 写作规范（第一人称/不编造/引语逐字）
+├── config/
+│   ├── persona.txt         # 人设（分段：身份/风格/边界/称呼）
+│   └── diary-template.md   # 日记模板
+├── memory/
+│   ├── memory-lite.md      # 编号共同记忆（一条一事、引语保留原话）
+│   ├── memory-lite.json    # 同内容机器可读版
+│   └── memory-daily/YYYY-MM/YYYY-MM-DD.md   # 按日叙事日记
+└── assets/                 # 声音/形象等二进制（可选）
+```
+
+### 质量红线（取自 xiaoxin-memory 治理实践）
+
+- 事实/日期/引语/来源逐字保留，改写只动叙事不动事实
+- 治理类条目（"不编造/不记成已做成/不当开关"批注）不被改写
+- 编号连续、缺失不猜、纠正即更新
+- 提炼产物过密钥扫描闸门后才可入仓
