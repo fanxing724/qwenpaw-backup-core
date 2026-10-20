@@ -116,3 +116,17 @@ v0.1 的 get_draft → submit_markdown → push 三段式保留，但**插入到
 - 用户修正：远端**单推 Gitee 正本**即可；GitHub 副本由 **Gitee 平台镜像自动同步**获得（先例：xiaoxin-memory 即此模式）。
 - 插件 targets 只配一个 remote（Gitee）；平台侧建仓时开启镜像同步。
 - 收益：插件少管一个远端、失败面更小、配置更简单；双副本效果不变。
+
+## v0.3 面板设计（2026-10-20，参考 companion-core）
+
+五页签结构（前端 ui/index.js + window.QwenPaw Host SDK + qwenpaw-tabs-* 类名前缀）：
+
+| 页签 | 内容 |
+|---|---|
+| 总览 | 三阶段状态卡片（积累/转化/推送最近运行）、raw 快照数+体积、精炼 commit 数 |
+| 历史 | 精炼 commit 列表 + push 记录；点开看当次内容；raw 快照浏览 |
+| 设置 | targets、agent 绑定、积累间隔/转化推送时间、globs、告警阈值 |
+| 检查 | 自检清单（本地仓可写/SSH key/远端可达/定时器/镜像同步）+ 一键修复 |
+| 闸门 | 敏感扫描跳过记录审计 |
+
+REST 支撑端点：GET /overview、GET /history、GET/PUT /settings、GET /checkup、POST /checkup/fix、GET /gate-log。
