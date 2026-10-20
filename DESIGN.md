@@ -110,3 +110,9 @@ v0.1 的 get_draft → submit_markdown → push 三段式保留，但**插入到
 - 实现方案：raw 积累**不用 git**——`vault/raw/YYYY-MM-DD-HH/` 日期目录快照（2h 一个，保留 N 天自动修剪）；git 仓库只服务精炼层（`vault/repo/`），每晚转化写入→commit→push 远端。
   - 好处：云端零 raw、无分支复杂度、raw 修剪不影响 git 历史。
 - 决策闭环清单：①paw-vault 双远端 ②内置定时器 ③全备+敏感闸门 ④key 入 working.secret ⑤连续3次失败告警 ⑥单 agent（多 agent 留 v0.4）⑦push 前统一转化 ⑧raw 不上云。
+
+## v0.3 定稿修正：单远端（2026-10-20 晨）
+
+- 用户修正：远端**单推 Gitee 正本**即可；GitHub 副本由 **Gitee 平台镜像自动同步**获得（先例：xiaoxin-memory 即此模式）。
+- 插件 targets 只配一个 remote（Gitee）；平台侧建仓时开启镜像同步。
+- 收益：插件少管一个远端、失败面更小、配置更简单；双副本效果不变。
