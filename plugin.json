@@ -1,7 +1,7 @@
 {
   "id": "backup-core",
   "name": "备份核心",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
   "description_i18n": {
     "zh-CN": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
@@ -25,20 +25,32 @@
     "category": "utility",
     "tools": [
       {
-        "name": "backup_core_get_draft",
-        "description": "读取脱敏后的备份草稿（供 Agent 转换格式）"
+        "name": "backup_core_accumulate",
+        "description": "立即积累绑定智能体的对话记忆流到本地 raw（脱敏+闸门）"
       },
       {
-        "name": "backup_core_submit_markdown",
-        "description": "提交 Agent 转换后的可读备份文档"
+        "name": "backup_core_get_draft",
+        "description": "读取当日备份草稿（对话流+日记），供主模型总结"
+      },
+      {
+        "name": "backup_core_submit_summary",
+        "description": "提交主模型总结（persona/memory_lite/daily），写入精炼仓库并 commit"
+      },
+      {
+        "name": "backup_core_commit_local",
+        "description": "采集+脱敏后提交到本地精炼仓库（高频，无网络）"
       },
       {
         "name": "backup_core_push",
-        "description": "把当前暂存备份推送到所有已配置远端"
+        "description": "把本地精炼仓库镜像推送到已配置远端（Gitee/GitHub）"
+      },
+      {
+        "name": "backup_core_overview",
+        "description": "备份系统总览：raw 快照数/精炼 commit 数/调度状态/最近运行"
       },
       {
         "name": "backup_core_status",
-        "description": "读取最近备份运行状态"
+        "description": "查看最近备份运行状态"
       }
     ]
   },

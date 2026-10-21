@@ -562,7 +562,10 @@ def get_summary_draft(day: str | None = None):
 def submit_summary(payload: dict):
     cfg = _read_settings()
     vault = _vault_path(cfg)
-    return _distiller().submit_summary(cfg, vault, payload)
+    try:
+        return _distiller().submit_summary(cfg, vault, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @router.get("/overview")

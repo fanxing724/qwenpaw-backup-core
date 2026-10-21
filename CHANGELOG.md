@@ -1,3 +1,10 @@
+# v0.5.0 ~ v0.5.2
+
+- v0.5.0：面板五页签（总览/历史/设置/检查/闸门）+ /history /checkup 端点；前端入口 ui/panel.js（registerRoutes+menu.add 与 companion 同款）。
+- v0.5.1：修复 Tbl/Title/KV 误用 h() 当组件调用导致的白屏。
+- v0.5.2：meta.tools 补全 7 个工具声明；CHANGELOG 补齐 v0.5.x。
+- 已知平台约束：SPA 路由表于 QwenPaw 启动时建立，新增前端入口需重启后才在控制台可见。
+
 # v0.2.0
 
 - 两级备份架构：第一级本地仓库高频提交（kind=local，无网络依赖，建议 1-2 小时一次）；第二级本地仓库镜像推送远端（kind=remote，GitHub/Gitee 多远端，建议每晚一次）。
