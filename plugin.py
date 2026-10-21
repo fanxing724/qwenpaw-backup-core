@@ -605,6 +605,55 @@ def asyncio_run(coro):
     return _a.run(coro)
 
 
+
+SUMMARY_PROMPT = (
+    "现在是备份核心的【晚间总结】时刻（后台例行任务，不要给用户发消息）。请依次："
+    "1) 调用 backup_core_get_draft 读取当日备份草稿；"
+    "2) 严格按草稿中 format_spec 的格式与质量红线，把对话记忆总结为 "
+    "persona / memory_lite / daily 三部分（事实、日期、用户引语逐字保留，不编造）；"
+    "3) 调用 backup_core_submit_summary 提交总结；"
+    "4) 调用 backup_core_push 推送精炼仓库到远端。"
+    "完成后用一句话记录结果即可，不要输出总结全文。")
+
+
+def _ensure_summary_job():
+    """幂等创建每晚总结 cron 任务（主模型三段式）。"""
+    from qwenpaw.plugins.registry import PluginRegistry
+    from qwenpaw.app.crons.models import CronJobSpec
+    cfg = _read_settings()
+    agent = cfg.get("agent_id") or ""
+    if not agent:
+        return
+    mgr = PluginRegistry().get_workspace_manager()
+    if mgr is None:
+        return
+    ws = mgr.agents.get(agent)
+    cm = getattr(ws, "cron_manager", None)
+    if cm is None or not callable(getattr(cm, "create_or_replace_job", None)):
+        return
+    spec = CronJobSpec.model_validate({
+        "id": "backup-core-nightly-summary",
+        "name": "备份核心：晚间总结（主模型三段式）",
+        "task_type": "agent",
+        "enabled": True,
+        "schedule": {"type": "cron", "cron": "0 23 * * *", "timezone": "Asia/Shanghai"},
+        "dispatch": {"type": "channel", "channel": "console", "mode": "final",
+                     "silent": True,
+                     "target": {"session_id": f"backup-summary-{agent}", "user_id": agent}},
+        "request": {"input": [{"content": [{"text": SUMMARY_PROMPT, "type": "text"}]}],
+                    "session_id": f"backup-summary-{agent}", "user_id": agent},
+        "runtime": {"max_concurrency": 1, "timeout_seconds": 900,
+                    "misfire_grace_seconds": 1800, "share_session": False},
+        "save_result_to_inbox": False,
+    })
+    import asyncio as _a
+    try:
+        _a.get_running_loop()
+        _a.create_task(cm.create_or_replace_job(spec))
+    except RuntimeError:
+        _a.run(cm.create_or_replace_job(spec))
+
+
 def install(app=None):
     return router
 
@@ -672,6 +721,10 @@ class BackupCorePlugin:
         def _startup():
             _CORE["api"] = api
             _SCHED.start()
+            try:
+                _ensure_summary_job()
+            except Exception:
+                pass
 
         async def _shutdown():
             await _SCHED.stop()
@@ -679,33 +732,8 @@ class BackupCorePlugin:
         api.register_startup_hook("backup_core_scheduler", _startup)
         api.register_shutdown_hook("backup_core_scheduler", _shutdown)
 
-        from qwenpaw.runtime.hooks import HookBase, HookResult
-        from qwenpaw.runtime.phases import Phase
-        owner = self
-
-        class AccumulateHook(HookBase):
-            phase = Phase.POST_RESPONSE
-            name = "backup_core_accumulate"
-            priority = 120
-
-            async def run(self, ctx):
-                try:
-                    cfg = _read_settings()
-                    if not cfg.get("enabled") or cfg.get("agent_id") != ctx.agent_id or ctx.error:
-                        return HookResult()
-                    now = time.monotonic()
-                    key = ("acc", ctx.agent_id)
-                    if now - _CORE["state"].get(key, -1e9) < 600:
-                        return HookResult()
-                    _CORE["state"][key] = now
-                    vault = _vault_path(cfg)
-                    await _flow().accumulate(ctx.workspace, ctx.session_id,
-                                             ctx.request.user_id, ctx.request.channel, vault)
-                except Exception:
-                    pass
-                return HookResult()
-
-        api.register_runtime_hook(AccumulateHook())
+        # v0.4.1：不再注册 runtime hook（热装重复注册会触发宿主 hook 拓扑排序
+        # cycle 报错）。积累改由 scheduler 轮询 + backup_core_accumulate 工具驱动。
         api.register_tool("backup_core_get_draft", tool_get_draft,
                           description="读取备份核心脱敏草稿（companion 快照与工作区重要文件）",
                           icon="📦", tool_type="internal")
