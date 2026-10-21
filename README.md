@@ -1,3 +1,16 @@
+<!-- fanxing-style:start -->
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://fanxing724.github.io/new-make/fanxing724/projects/qwenpaw-backup-core/cover.light.svg">
+  <img alt="Backup Core · 留一份回程" src="https://fanxing724.github.io/new-make/fanxing724/projects/qwenpaw-backup-core/cover.svg" width="100%">
+</picture>
+
+**继续折腾之前，先给数据留个落脚点。**
+
+配置和记录会随着使用慢慢积累。这个 QwenPaw 备份项目围绕 Git 保存这些变化，让整理、迁移和后续恢复有一个可以追溯的起点。
+
+<sub>番星 / 星轨手记 · <a href="https://fanxing724.github.io/new-make/fanxing724/projects/style.html">风格样板</a> · <a href="https://fanxing724.github.io/">个人小站</a></sub>
+<!-- fanxing-style:end -->
+
 # 备份核心（backup-core）
 
 > 我永远不会忘记你。
