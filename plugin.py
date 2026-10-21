@@ -586,6 +586,68 @@ def overview():
             "fail_streak": _CORE.get("fail_streak", 0)}
 
 
+@router.get("/history")
+def history():
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    repo = vault / "repo"
+    commits = []
+    if (repo / ".git").is_dir():
+        out = subprocess.run(
+            ["git", "log", "--pretty=%h|%ad|%s", "--date=short", "-20"],
+            cwd=repo, capture_output=True, text=True).stdout
+        for line in out.strip().splitlines():
+            parts = line.split("|", 2)
+            if len(parts) == 3:
+                commits.append({"hash": parts[0], "date": parts[1], "message": parts[2]})
+    raw_root = vault / "raw"
+    snaps = sorted((d.name for d in raw_root.iterdir() if d.is_dir()), reverse=True)[:14]         if raw_root.is_dir() else []
+    return {"commits": commits, "raw_days": snaps,
+            "runs": _read_json(_DATA_DIR / "backup-status.json", [])[-10:]}
+
+
+@router.get("/checkup")
+def checkup():
+    import os as _os
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    items = []
+
+    def add(iid, label, status, detail):
+        items.append({"id": iid, "label": label, "status": status, "detail": detail})
+
+    try:
+        vault.mkdir(parents=True, exist_ok=True)
+        probe = vault / ".write-probe"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        add("vault", "备份目录可写", "ok", str(vault))
+    except Exception as exc:
+        add("vault", "备份目录可写", "fail", str(exc)[:150])
+    repo = vault / "repo"
+    add("repo", "本地精炼仓库", "ok" if (repo / ".git").is_dir() else "warn",
+        "已初始化" if (repo / ".git").is_dir() else "尚未初始化（首次总结时自动创建）")
+    key = cfg.get("key_path") or str(Path.home() / ".ssh" / "id_ed25519")
+    add("ssh", "SSH 私钥", "ok" if Path(key).is_file() else "fail", key)
+    remotes = [t for t in cfg.get("targets", []) if t.get("kind") == "remote"]
+    if remotes:
+        t = remotes[0]
+        r = subprocess.run(["git", "ls-remote", t["url"], "HEAD"],
+                           capture_output=True, text=True, timeout=25)
+        add("remote", f"远端可达（{t['name']}）",
+            "ok" if r.returncode == 0 else "fail",
+            t["url"] if r.returncode == 0 else (r.stderr or r.stdout)[:150])
+    else:
+        add("remote", "远端可达", "warn", "尚未配置 remote target")
+    add("sched", "调度器运行中", "ok" if _SCHED.running else "fail", "")
+    add("model", "日记模型配置",
+        "ok" if cfg.get("base_url") and cfg.get("model") else "warn",
+        f"{cfg.get('model') or '未配置'}")
+    add("agent", "绑定智能体", "ok" if cfg.get("agent_id") else "fail",
+        cfg.get("agent_id") or "未绑定")
+    return {"items": items}
+
+
 @router.get("/gate-log")
 def gate_log():
     return _flow().gate_log()
