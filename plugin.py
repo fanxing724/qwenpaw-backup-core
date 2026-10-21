@@ -359,10 +359,12 @@ def _push_remote(cfg, message):
                 _run_git(["remote", "set-url", target["name"], target["url"]], repo, cfg)
             else:
                 _run_git(["remote", "add", target["name"], target["url"]], repo, cfg)
+            remote_branch = target.get("branch") or branch
+            refspec = f"{branch}:{remote_branch}"
             try:
-                _run_git(["push", target["name"], branch], repo, cfg)
+                _run_git(["push", target["name"], refspec], repo, cfg)
             except HTTPException:
-                _run_git(["push", "-u", target["name"], branch], repo, cfg)
+                _run_git(["push", "-u", target["name"], refspec], repo, cfg)
             results.append({"target": target["name"], "state": "pushed"})
         except HTTPException as exc:
             results.append({"target": target["name"], "state": "error", "error": exc.detail})
