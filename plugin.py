@@ -31,6 +31,17 @@ SECRET_PATTERNS = re.compile(
     r"(api[_-]?key|token|secret|password|passwd|authorization|bearer|private[_-]?key)",
     re.IGNORECASE)
 
+import importlib.util as _ilu
+from pathlib import Path as _P
+
+
+def _load_sibling(name):
+    spec = _ilu.spec_from_file_location(name, _P(__file__).parent / f"{name}.py")
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 router = APIRouter()
 
 _DATA_DIR = Path(os.environ.get(
@@ -61,6 +72,15 @@ class Settings(BaseModel):
     repo_subdir: str = Field(default="backups", max_length=60)
     auto: bool = False
     time: str = "03:30"
+    vault_path: str = Field(default="", max_length=300)
+    accumulate_interval_minutes: int = Field(default=120, ge=10, le=1440)
+    distill_time: str = Field(default="23:00", max_length=5)
+    push_time: str = Field(default="23:30", max_length=5)
+    keep_days: int = Field(default=14, ge=1, le=365)
+    enabled: bool = True
+    base_url: str = Field(default="", max_length=2000)
+    model: str = Field(default="", max_length=200)
+    api_key: str = Field(default="", max_length=4000, repr=False)
 
 
 def _read_json(path, default):
@@ -448,6 +468,127 @@ def status():
     return _read_json(_DATA_DIR / "backup-status.json", [])
 
 
+
+# ── v0.3 上下文：积累/转化/调度 ────────────────────────────
+_memoryflow = _load_sibling("memoryflow")
+_distillmod = _load_sibling("distill")
+_schedulermod = _load_sibling("scheduler")
+
+_CORE = {"state": {}, "fail_streak": 0}
+
+
+def _vault_path(cfg):
+    p = cfg.get("vault_path") or ""
+    if p:
+        return Path(p)
+    base = Path(os.environ.get("QWENPAW_WORKING_DIR", "") or (Path.home() / ".qwenpaw"))
+    agent = cfg.get("agent_id") or ""
+    return base / "workspaces" / agent / "backups" / "vault" if agent else base / "backups" / "vault"
+
+
+def _flow():
+    if "flow" not in _CORE:
+        _CORE["flow"] = _memoryflow.MemoryFlow(_CORE_PROXY)
+    return _CORE["flow"]
+
+
+def _distiller():
+    if "distill" not in _CORE:
+        _CORE["distill"] = _distillmod.Distiller(_CORE_PROXY)
+    return _CORE["distill"]
+
+
+_CORE_PROXY = {"_DATA_DIR": _DATA_DIR}
+
+
+async def _poll_accumulate(cfg, vault):
+    """兜底轮询：遍历绑定 agent 近期会话积累记忆流。"""
+    from qwenpaw.plugins.registry import PluginRegistry
+    mgr = PluginRegistry().get_workspace_manager()
+    if mgr is None:
+        return {"accumulated": 0, "reason": "no-workspace-manager"}
+    ws = mgr.agents.get(cfg.get("agent_id") or "")
+    if ws is None:
+        return {"accumulated": 0, "reason": "agent-workspace-not-found"}
+    chats = await ws.chat_manager.list_chats()
+    chats = sorted(chats, key=lambda c: c.updated_at, reverse=True)[:3]
+    done = 0
+    details = []
+    for chat in chats:
+        sid = getattr(chat, "session_id", None) or chat.id
+        r = await _flow().accumulate(ws, sid, getattr(chat, "user_id", "") or "",
+                                     getattr(chat, "channel", "") or "", vault)
+        details.append({"chat": chat.id[:8], **r})
+        if r.get("added"):
+            done += 1
+    return {"accumulated": done, "sessions": len(chats), "details": details}
+
+
+_CORE.update({"settings": _read_settings, "vault_path": _vault_path,
+              "poll_accumulate": _poll_accumulate,
+              "push_remote": lambda cfg, msg: _push_remote(cfg, msg)})
+_CORE_PROXY.update(_CORE)
+
+_SCHED = _schedulermod.Scheduler(_CORE_PROXY)
+
+
+@router.post("/accumulate")
+async def accumulate_now():
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    return await _poll_accumulate(cfg, vault)
+
+
+@router.post("/distill")
+def distill_now(payload: dict | None = None):
+    cfg = _read_settings()
+    if not cfg.get("base_url") or not cfg.get("model"):
+        raise HTTPException(400, "尚未配置转化模型（base_url/model）")
+    vault = _vault_path(cfg)
+    day = (payload or {}).get("day")
+    return _distiller().run(cfg, vault, day)
+
+
+@router.get("/overview")
+def overview():
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    raw_root = vault / "raw"
+    snaps = sorted(raw_root.iterdir()) if raw_root.is_dir() else []
+    repo = vault / "repo"
+    commits = 0
+    if (repo / ".git").is_dir():
+        out = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        commits = int(out) if out.isdigit() else 0
+    return {"vault": str(vault), "agent_id": cfg.get("agent_id"),
+            "raw_snapshots": len(snaps),
+            "raw_latest": snaps[-1].name if snaps else None,
+            "repo_commits": commits,
+            "scheduler_running": _SCHED.running,
+            "last": {k: _CORE["state"].get(k) for k in ("last", "last_distill", "last_push")},
+            "fail_streak": _CORE.get("fail_streak", 0)}
+
+
+@router.get("/gate-log")
+def gate_log():
+    return _flow().gate_log()
+
+
+
+def asyncio_run(coro):
+    import asyncio as _a
+    try:
+        loop = _a.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(1) as ex:
+            return ex.submit(lambda: _a.run(coro)).result()
+    return _a.run(coro)
+
+
 def install(app=None):
     return router
 
@@ -499,12 +640,59 @@ class BackupCorePlugin:
 
     def register(self, api):
         api.register_http_router(router, prefix="/backup-core", tags=["backup-core"])
+
+        def _startup():
+            _CORE["api"] = api
+            _SCHED.start()
+
+        async def _shutdown():
+            await _SCHED.stop()
+
+        api.register_startup_hook("backup_core_scheduler", _startup)
+        api.register_shutdown_hook("backup_core_scheduler", _shutdown)
+
+        from qwenpaw.runtime.hooks import HookBase, HookResult
+        from qwenpaw.runtime.phases import Phase
+        owner = self
+
+        class AccumulateHook(HookBase):
+            phase = Phase.POST_RESPONSE
+            name = "backup_core_accumulate"
+            priority = 120
+
+            async def run(self, ctx):
+                try:
+                    cfg = _read_settings()
+                    if not cfg.get("enabled") or cfg.get("agent_id") != ctx.agent_id or ctx.error:
+                        return HookResult()
+                    now = time.monotonic()
+                    key = ("acc", ctx.agent_id)
+                    if now - _CORE["state"].get(key, -1e9) < 600:
+                        return HookResult()
+                    _CORE["state"][key] = now
+                    vault = _vault_path(cfg)
+                    await _flow().accumulate(ctx.workspace, ctx.session_id,
+                                             ctx.request.user_id, ctx.request.channel, vault)
+                except Exception:
+                    pass
+                return HookResult()
+
+        api.register_runtime_hook(AccumulateHook())
         api.register_tool("backup_core_get_draft", tool_get_draft,
                           description="读取备份核心脱敏草稿（companion 快照与工作区重要文件）",
                           icon="📦", tool_type="internal")
         api.register_tool("backup_core_submit_markdown", tool_submit_markdown,
                           description="提交转换后的可读备份文档（markdown）",
                           icon="✍️", tool_type="internal")
+        api.register_tool("backup_core_accumulate", lambda: json.dumps(asyncio_run(_poll_accumulate(_read_settings(), _vault_path(_read_settings()))), ensure_ascii=False),
+                          description="立即积累绑定智能体的对话记忆流到本地 raw",
+                          icon="🧠", tool_type="internal")
+        api.register_tool("backup_core_distill", lambda: json.dumps(distill_now(), ensure_ascii=False),
+                          description="立即执行每日转化：raw 积累总结为 xiaoxin-memory 式精炼仓库",
+                          icon="⚗️", tool_type="internal")
+        api.register_tool("backup_core_overview", lambda: json.dumps(overview(), ensure_ascii=False),
+                          description="备份系统总览：raw 快照数/精炼 commit 数/调度状态/最近运行",
+                          icon="📊", tool_type="internal")
         api.register_tool("backup_core_commit_local", tool_commit_local,
                           description="第一级备份：采集+脱敏后提交到本地仓库（高频，无网络）",
                           icon="💾", tool_type="internal")
