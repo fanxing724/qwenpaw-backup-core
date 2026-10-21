@@ -549,6 +549,20 @@ def distill_now(payload: dict | None = None):
     return _distiller().run(cfg, vault, day)
 
 
+@router.get("/summary-draft")
+def get_summary_draft(day: str | None = None):
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    return _distiller().prepare_draft(cfg, vault, day)
+
+
+@router.post("/submit-summary")
+def submit_summary(payload: dict):
+    cfg = _read_settings()
+    vault = _vault_path(cfg)
+    return _distiller().submit_summary(cfg, vault, payload)
+
+
 @router.get("/overview")
 def overview():
     cfg = _read_settings()
@@ -610,6 +624,18 @@ def tool_submit_markdown(text: str) -> str:
     except HTTPException as exc:
         return f"提交失败：{exc.detail}"
     return f"已保存 {result['saved']}（{result['bytes']} 字节），下一步调用 backup_core_push。"
+
+
+def tool_submit_summary(persona: str = "", memory_lite: list = None, daily: str = "", day: str = "") -> str:
+    """提交主模型总结到精炼仓库。"""
+    try:
+        r = submit_summary({"persona": persona, "memory_lite": memory_lite or [],
+                            "daily": daily, "day": day})
+    except HTTPException as exc:
+        return f"提交失败：{exc.detail}"
+    except ValueError as exc:
+        return f"提交被拒：{exc}"
+    return json.dumps(r, ensure_ascii=False)
 
 
 def tool_commit_local(message: str = "") -> str:
@@ -693,6 +719,12 @@ class BackupCorePlugin:
         api.register_tool("backup_core_overview", lambda: json.dumps(overview(), ensure_ascii=False),
                           description="备份系统总览：raw 快照数/精炼 commit 数/调度状态/最近运行",
                           icon="📊", tool_type="internal")
+        api.register_tool("backup_core_get_draft", lambda: json.dumps(_distiller().prepare_draft(_read_settings(), _vault_path(_read_settings())), ensure_ascii=False)[:60000],
+                          description="读取当日备份草稿（对话流+日记），供主模型总结",
+                          icon="📄", tool_type="internal")
+        api.register_tool("backup_core_submit_summary", tool_submit_summary,
+                          description="提交主模型总结（persona/memory_lite/daily），写入精炼仓库并 commit",
+                          icon="✍️", tool_type="internal")
         api.register_tool("backup_core_commit_local", tool_commit_local,
                           description="第一级备份：采集+脱敏后提交到本地仓库（高频，无网络）",
                           icon="💾", tool_type="internal")

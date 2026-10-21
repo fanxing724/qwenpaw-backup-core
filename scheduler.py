@@ -41,15 +41,18 @@ class Scheduler:
                     await c["poll_accumulate"](cfg, vault)
                 except Exception:
                     pass
+                try:
+                    c["state"]["last_diary"] = c["distill"].record_diary(cfg, vault)
+                except Exception as exc:
+                    c["state"]["last_diary"] = {"state": "error", "error": str(exc)[:150]}
             # 每晚转化
             if _hhmm_passed(now, cfg.get("distill_time", "23:00")):
                 day = time.strftime("%Y-%m-%d")
                 if self._last_distill_day != day:
                     self._last_distill_day = day
-                    try:
-                        c["state"]["last_distill"] = c["distill"].run(cfg, vault)
-                    except Exception as exc:
-                        c["state"]["last_distill"] = {"state": "error", "error": str(exc)[:200]}
+                    # v0.4：总结交给主模型(agent 三段式)，这里只标记待总结
+                    c["state"]["pending_summary"] = {"day": day,
+                                                     "hint": "请绑定 agent 执行：backup_core_get_draft → 总结 → backup_core_submit_summary → backup_core_push"}
             # 每晚推送（转化之后）
             if _hhmm_passed(now, cfg.get("push_time", "23:30")):
                 day = time.strftime("%Y-%m-%d")

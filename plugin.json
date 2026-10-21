@@ -1,7 +1,7 @@
 {
   "id": "backup-core",
   "name": "备份核心",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
   "description_i18n": {
     "zh-CN": "把重要文件备份到 Gitee/GitHub 私有仓库：插件采集并脱敏，Agent 转换为可读格式，git over SSH 推送。",
